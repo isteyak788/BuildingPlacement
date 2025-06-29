@@ -1,0 +1,28 @@
+using UnityEngine;
+
+[CreateAssetMenu(fileName = "NewBuildingData", menuName = "Building System/Building Data")]
+public class BuildingData : ScriptableObject
+{
+    [Header("Basic Building Info")]
+    public string buildingName = "New Building";
+    public Sprite buildingIcon; // Icon for UI display
+
+    [Header("Construction Prefabs")]
+    [Tooltip("The prefab used during the construction phase. This prefab MUST have the BuildingConstruction script attached.")]
+    public GameObject initialConstructionPrefab;
+    [Tooltip("Optional: The prefab to swap to when construction is complete. If left null, the initial construction prefab's visuals will just become solid.")]
+    public GameObject finalPrefab; 
+
+    [Header("Construction Time")]
+    [Tooltip("How long in seconds it takes to construct this building.")]
+    public float constructionTime = 5f;
+
+    [Header("Placement Rules")]
+    [Tooltip("The size of the building's footprint for placement checks (X=width, Z=depth). Y is ignored.")]
+    public Vector3 placementFootprintSize = new Vector3(1, 1, 1);
+    [Tooltip("How many points in a grid across the footprint to check for terrain height differences. Higher means more accurate but slightly more expensive.")]
+    [Range(1, 10)]
+    public int terrainCheckGridDensity = 3;
+    [Tooltip("Maximum allowable height difference (in Unity units) across the building's footprint for valid placement (e.g., to prevent placing on steep slopes).")]
+    public float maxTerrainHeightDifference = 1.0f; // Max allowed height difference across footprint
+}
