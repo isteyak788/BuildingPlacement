@@ -1,0 +1,454 @@
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI; // Required for Button component
+using System.Collections.Generic;
+using System.Linq; // Required for Min() and Max() extension methods
+
+public class BuildingPlacementManager : MonoBehaviour
+{
+    // Singleton instance for easy access from other scripts
+    public static BuildingPlacementManager Instance { get; private set; }
+
+    [Header("Placement Settings")]
+    [Tooltip("LayerMask for terrain/ground where buildings can be placed.")]
+    public LayerMask placementLayerMask;
+    [Tooltip("Speed of building rotation when using Q and E keys (degrees per second).")]
+    public float rotationSpeed = 90f;
+    public float maxPlacementDistance = 100f; // Max distance for raycast from mouse
+    [Tooltip("How high above the calculated base point to start the downward terrain raycasts.")]
+    public float terrainRaycastStartHeight = 5f; // Ensures ray starts above any terrain bumps
+
+    [Header("Input Keys")]
+    [Tooltip("The key to rotate the building counter-clockwise.")]
+    public KeyCode rotateLeftKey = KeyCode.Q; // Default to Q
+    [Tooltip("The key to rotate the building clockwise.")]
+    public KeyCode rotateRightKey = KeyCode.E; // Default to E
+    [Tooltip("The key to hold for 45-degree rotation snapping.")]
+    public KeyCode snapRotationModifierKey = KeyCode.LeftShift; // Default to Left Shift
+    [Tooltip("The key to cancel the current building placement.")]
+    public KeyCode cancelPlacementKey = KeyCode.Escape; // Default to Escape
+
+    [Header("Building Data & Visuals")]
+    [Tooltip("Assign all your BuildingData ScriptableObjects here. Order should correspond to UI buttons.")]
+    public BuildingData[] availableBuildings;
+    public Material validPlacementMaterial; // Green transparent material for valid preview
+    public Material invalidPlacementMaterial; // Red transparent material for invalid preview
+
+    [Header("UI References")]
+    [Tooltip("Assign your UI buttons here. Order should correspond to 'Available Buildings' array.")]
+    public Button[] buildingButtons;
+
+    private BuildingData currentBuildingDataToPlace; // The BuildingData currently selected for placement
+    private GameObject currentPreviewBuilding; // The instantiated preview ghost object
+
+    public bool IsPlacingBuilding { get; private set; } = false;
+
+    private float currentRotationY = 0f; // Current Y rotation for the preview building (0-0-360 degrees)
+
+    void Awake()
+    {
+        // Singleton pattern implementation
+        if (Instance != null && Instance != this)
+        {
+            Destroy(gameObject); // Destroy duplicate instances
+        }
+        else
+        {
+            Instance = this; // Set the instance
+            // Optional: DontDestroyOnLoad(gameObject); // If this manager should persist across scenes
+        }
+    }
+
+    void Start()
+    {
+        // Hook up UI buttons to select buildings based on BuildingData
+        for (int i = 0; i < buildingButtons.Length; i++)
+        {
+            if (i < availableBuildings.Length && availableBuildings[i] != null)
+            {
+                int dataIndex = i; // Local copy for closure in AddListener
+                buildingButtons[i].onClick.AddListener(() => SelectBuilding(availableBuildings[dataIndex]));
+
+                // Optionally set button icon/text from BuildingData
+                Text buttonText = buildingButtons[i].GetComponentInChildren<Text>();
+                if (buttonText != null)
+                    buttonText.text = availableBuildings[dataIndex].buildingName;
+
+                Image buttonImage = buildingButtons[i].image;
+                if (buttonImage != null && availableBuildings[dataIndex].buildingIcon != null)
+                    buttonImage.sprite = availableBuildings[dataIndex].buildingIcon;
+            }
+            else
+            {
+                Debug.LogWarning($"Button at index {i} ('{buildingButtons[i].name}') has no corresponding BuildingData assigned or index out of bounds in 'availableBuildings' array.");
+            }
+        }
+    }
+
+    void Update()
+    {
+        // Only update preview and handle building rotation if in placement mode
+        if (IsPlacingBuilding && currentPreviewBuilding != null)
+        {
+            UpdatePreviewPosition();
+            HandleRotation(); // Call this to handle building rotation with Q/E and snapping
+
+            // Left mouse click to try placing the building
+            if (Input.GetMouseButtonDown(0) && !IsMouseOverUI())
+            {
+                TryPlaceBuilding();
+            }
+        }
+
+        // Key to cancel placement (configurable in Inspector)
+        if (Input.GetKeyDown(cancelPlacementKey)) 
+        {
+            CancelPlacement();
+        }
+    }
+
+    // Called by UI buttons to select a building type and activate placement mode
+    public void SelectBuilding(BuildingData buildingData)
+    {
+        if (buildingData == null)
+        {
+            Debug.LogError("Attempted to select a null BuildingData.");
+            return;
+        }
+        if (buildingData.initialConstructionPrefab == null)
+        {
+            Debug.LogError($"BuildingData for '{buildingData.buildingName}' is missing 'initialConstructionPrefab'. Cannot select.");
+            return;
+        }
+
+        // Always reset rotation to 0 when a new building selection process begins
+        // This ensures every fresh selection starts with a default orientation.
+        currentRotationY = 0f; 
+        Debug.Log($"Building selection process initiated. Resetting preview rotation to {currentRotationY:F2} degrees.");
+
+        // Logic for re-selecting or switching building types while in placement mode
+        if (IsPlacingBuilding)
+        {
+            if (buildingData == currentBuildingDataToPlace)
+            {
+                // If the same building type is selected again, cancel current placement
+                // This allows re-positioning or effectively 'resetting' the current ghost
+                Debug.Log($"Reselecting {buildingData.buildingName}: Cancelling current placement.");
+                CancelPlacement(); // This will destroy the old preview and clear IsPlacingBuilding
+                // Then, proceed to start placement again below (effectively a reset for the same building)
+            }
+            else
+            {
+                // If a *different* building type is selected, cancel current and start new
+                Debug.Log($"Switching from {currentBuildingDataToPlace?.buildingName ?? "N/A"} to {buildingData.buildingName}: Cancelling current placement and starting new.");
+                CancelPlacement(); // This will destroy the old preview and clear IsPlacingBuilding
+                // Then, proceed to start placement again below
+            }
+        }
+        
+        currentBuildingDataToPlace = buildingData;
+        StartPlacement(currentBuildingDataToPlace.initialConstructionPrefab);
+        Debug.Log($"Placement mode activated for: {currentBuildingDataToPlace.buildingName}. Press '{cancelPlacementKey.ToString()}' or re-click its button to exit.");
+    }
+
+    // Instantiates the preview building and prepares it
+    void StartPlacement(GameObject constructionPrefab)
+    {
+        if (currentPreviewBuilding != null)
+        {
+            Destroy(currentPreviewBuilding);
+        }
+
+        // --- FIX FOR JITTERING: Instantiate directly at the raycast hit point ---
+        Vector3 initialPlacementPos = Vector3.zero;
+        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+        RaycastHit hit;
+        if (Physics.Raycast(ray, out hit, maxPlacementDistance, placementLayerMask))
+        {
+            initialPlacementPos = hit.point;
+        }
+        // If raycast fails, it will instantiate at Vector3.zero, and then UpdatePreviewPosition will move it offscreen.
+
+        currentPreviewBuilding = Instantiate(constructionPrefab, initialPlacementPos, Quaternion.Euler(0, currentRotationY, 0));
+        currentPreviewBuilding.name = constructionPrefab.name + " (Preview)"; // Helpful for debugging in Hierarchy
+
+        // Get the BuildingConstruction script on the preview to prepare it
+        BuildingConstruction constructionScript = currentPreviewBuilding.GetComponent<BuildingConstruction>();
+        if (constructionScript != null)
+        {
+            constructionScript.PrepareForPreview(); // <--- This is the correct method call
+        }
+        else
+        {
+            Debug.LogWarning($"Preview prefab '{constructionPrefab.name}' is missing a 'BuildingConstruction' script. Ensure it's attached to the prefab's root and correctly configured.", currentPreviewBuilding);
+            // Fallback for previews without BuildingConstruction: ensure all child colliders are triggers
+            foreach (Collider col in currentPreviewBuilding.GetComponentsInChildren<Collider>())
+            {
+                col.isTrigger = true; 
+            }
+        }
+        
+        SetPreviewMaterial(invalidPlacementMaterial);
+        IsPlacingBuilding = true; // Set the public property to true
+        // IMPORTANT: currentRotationY is NOT reset here. It retains its previous value for continuous placement.
+    }
+
+    // Updates the position and rotation of the preview building
+    void UpdatePreviewPosition()
+    {
+        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+        RaycastHit hit;
+
+        if (Physics.Raycast(ray, out hit, maxPlacementDistance, placementLayerMask))
+        {
+            currentPreviewBuilding.transform.position = hit.point;
+            currentPreviewBuilding.transform.rotation = Quaternion.Euler(0, currentRotationY, 0);
+            // Debug.Log($"Preview positioned at {hit.point}, applying rotation {currentRotationY:F2}"); // Uncomment for verbose logging
+            
+            bool canPlace = CanPlaceBuilding(hit.point, currentPreviewBuilding.transform.rotation,
+                                            currentBuildingDataToPlace.placementFootprintSize,
+                                            currentBuildingDataToPlace.terrainCheckGridDensity,
+                                            currentBuildingDataToPlace.maxTerrainHeightDifference);
+
+            SetPreviewMaterial(canPlace ? validPlacementMaterial : invalidPlacementMaterial);
+        }
+        else
+        {
+            // If raycast doesn't hit the terrain, move preview far away and show invalid
+            currentPreviewBuilding.transform.position = new Vector3(0, -9999, 0);
+            SetPreviewMaterial(invalidPlacementMaterial);
+        }
+    }
+
+    // Handles rotation input using keyboard keys (Q/E)
+    void HandleRotation()
+    {
+        float rotateInputAxis = 0f;
+
+        // Continuous rotation with Q and E
+        if (Input.GetKey(rotateLeftKey))
+        {
+            rotateInputAxis -= 1f; // Apply negative rotation
+        }
+        if (Input.GetKey(rotateRightKey))
+        {
+            rotateInputAxis += 1f; // Apply positive rotation
+        }
+        
+        // Check for 45-degree snapping
+        if (Input.GetKey(snapRotationModifierKey)) // If Shift is held
+        {
+            // Only snap on key *down* events for Q or E (to trigger once per press)
+            if (Input.GetKeyDown(rotateLeftKey) || Input.GetKeyDown(rotateRightKey))
+            {
+                // Calculate the nearest 45-degree snap point to the current rotation.
+                float nearestSnap = Mathf.Round(currentRotationY / 45f) * 45f;
+
+                // Determine the new currentRotationY based on key press, relative to the nearest snap
+                if (Input.GetKeyDown(rotateLeftKey))
+                {
+                    currentRotationY = nearestSnap - 45f;
+                }
+                else if (Input.GetKeyDown(rotateRightKey))
+                {
+                    currentRotationY = nearestSnap + 45f;
+                }
+
+                // Ensure the final rotation after snapping stays within [0, 360) using Mathf.Repeat
+                currentRotationY = Mathf.Repeat(currentRotationY, 360f);
+                
+                // IMPORTANT: Return early to prevent the continuous rotation logic from also running
+                // in the same frame as a snap, which could cause unwanted jumps or 'going back'.
+                return; 
+            }
+        }
+        
+        // If no modifier key held, or Shift was held but Q/E were not just pressed (for snapping)
+        // Only apply continuous rotation if Q or E is actually being held.
+        if (rotateInputAxis != 0) 
+        {
+            currentRotationY += rotateInputAxis * rotationSpeed * Time.deltaTime;
+            // Ensure continuous rotation stays within [0, 360)
+            currentRotationY = Mathf.Repeat(currentRotationY, 360f); 
+        }
+    }
+
+    // Checks if the building can be placed at the current position based on rules
+    bool CanPlaceBuilding(Vector3 position, Quaternion rotation, Vector3 footprintSize, int gridDensity, float maxSlopeHeight)
+    {
+        // --- 1. Check for Overlap with other Placed Buildings ---
+        Collider previewCollider = currentPreviewBuilding.GetComponent<Collider>();
+        if (previewCollider == null)
+        {
+            // Try to find any collider in children if not on root
+            previewCollider = currentPreviewBuilding.GetComponentInChildren<Collider>();
+            if (previewCollider == null)
+            {
+                Debug.LogWarning("Preview building has no collider (or no collider in children) for placement check! Ensure your building prefab has at least one Collider component.", currentPreviewBuilding);
+                return false;
+            }
+        }
+
+        Vector3 overlapBoxCenter = previewCollider.bounds.center;
+        Vector3 overlapBoxHalfExtents = previewCollider.bounds.extents;
+
+        // Using ~placementLayerMask to exclude the terrain layer from overlap checks with other buildings
+        Collider[] hitColliders = Physics.OverlapBox(overlapBoxCenter, overlapBoxHalfExtents, rotation, ~placementLayerMask);
+
+        foreach (Collider col in hitColliders)
+        {
+            // Skip the preview building's own collider(s) and its children's colliders
+            if (col.gameObject == currentPreviewBuilding || col.transform.IsChildOf(currentPreviewBuilding.transform)) continue;
+
+            // Check if the collider belongs to another *placed* building (using a Tag)
+            // Ensure your actual placed buildings have the "Building" tag set.
+            if (col.CompareTag("Building"))
+            {
+                return false;
+            }
+        }
+
+        // --- 2. Check Terrain Validity under the Building's Full Footprint ---
+        if (gridDensity <= 0) gridDensity = 1; // Ensure gridDensity is at least 1
+
+        List<float> hitYPositions = new List<float>();
+
+        // Iterate through a grid of points within the building's footprint
+        for (int x = 0; x < gridDensity; x++)
+        {
+            for (int z = 0; z < gridDensity; z++)
+            {
+                // Calculate normalized offsets from the center [-0.5, 0.5]
+                float normX = (gridDensity == 1) ? 0 : (x / (float)(gridDensity - 1)) - 0.5f;
+                float normZ = (gridDensity == 1) ? 0 : (z / (float)(gridDensity - 1)) - 0.5f;
+
+                // Apply footprint size and rotate the offset
+                Vector3 localOffset = new Vector3(normX * footprintSize.x, 0, normZ * footprintSize.z);
+                Vector3 rotatedOffset = rotation * localOffset;
+
+                // Calculate the ray origin (current preview position + rotated offset + starting height above)
+                Vector3 rayOrigin = new Vector3(position.x + rotatedOffset.x, position.y + terrainRaycastStartHeight, position.z + rotatedOffset.z);
+
+                RaycastHit terrainHit;
+                // Cast ray downwards to hit the terrain layer
+                if (Physics.Raycast(rayOrigin, Vector3.down, out terrainHit, terrainRaycastStartHeight * 2, placementLayerMask))
+                {
+                    hitYPositions.Add(terrainHit.point.y);
+                }
+                else
+                {
+                    // If any ray doesn't hit terrain, it means the building extends over a cliff or void
+                    return false;
+                }
+            }
+        }
+
+        if (hitYPositions.Count == 0)
+        {
+            Debug.LogWarning("No terrain hit points collected for placement check. Check gridDensity and placementLayerMask configuration.");
+            return false;
+        }
+
+        // Calculate height difference across the footprint
+        float minY = hitYPositions.Min();
+        float maxY = hitYPositions.Max();
+
+        if (maxY - minY > maxSlopeHeight)
+        {
+            // Terrain is too sloped for placement
+            return false;
+        }
+
+        return true; // All checks passed
+    }
+
+    // Attempts to place the building on left mouse click
+    void TryPlaceBuilding()
+    {
+        if (currentPreviewBuilding == null || currentBuildingDataToPlace == null) return;
+
+        // Perform final placement checks using the current preview state
+        if (CanPlaceBuilding(currentPreviewBuilding.transform.position, currentPreviewBuilding.transform.rotation,
+                             currentBuildingDataToPlace.placementFootprintSize,
+                             currentBuildingDataToPlace.terrainCheckGridDensity,
+                             currentBuildingDataToPlace.maxTerrainHeightDifference))
+        {
+            // Instantiate the actual building (not the preview, though it's the same prefab)
+            // Ensure this new instance inherits the preview's final position and rotation
+            GameObject placedConstructionBuilding = Instantiate(currentBuildingDataToPlace.initialConstructionPrefab,
+                                                               currentPreviewBuilding.transform.position,
+                                                               currentPreviewBuilding.transform.rotation);
+            placedConstructionBuilding.name = currentBuildingDataToPlace.buildingName; // Name for clarity
+
+            // Get the BuildingConstruction script on the newly placed building
+            BuildingConstruction constructionScript = placedConstructionBuilding.GetComponent<BuildingConstruction>();
+            if (constructionScript != null)
+            {
+                constructionScript.Initialize(currentBuildingDataToPlace); // Pass BuildingData to the new instance
+                constructionScript.StartConstruction(); // Begin the construction process
+            }
+            else
+            {
+                Debug.LogWarning($"Placed prefab '{placedConstructionBuilding.name}' is missing a 'BuildingConstruction' script. It will appear fully built immediately and might not have proper tags/colliders.", placedConstructionBuilding);
+                // Fallback: If no construction script, just ensure it's visible, solid, and tagged
+                foreach(Transform child in placedConstructionBuilding.transform)
+                {
+                    child.gameObject.SetActive(true);
+                }
+                foreach (Collider col in placedConstructionBuilding.GetComponentsInChildren<Collider>())
+                {
+                    col.isTrigger = false;
+                }
+                placedConstructionBuilding.tag = "Building"; // Ensure it has the tag for overlap checks
+            }
+
+            Destroy(currentPreviewBuilding); // Destroy the temporary preview ghost object
+            currentPreviewBuilding = null; // Clear reference
+
+            // Automatically start new placement with the same building type, retaining the current rotation
+            StartPlacement(currentBuildingDataToPlace.initialConstructionPrefab);
+
+            Debug.Log("Building placed successfully! Ready to place another (or '" + cancelPlacementKey.ToString() + "' to exit).");
+        }
+        else
+        {
+            Debug.Log("Cannot place building here! Invalid position, overlap with other buildings, or terrain is too sloped.");
+        }
+    }
+
+    // Cancels the current placement process, destroying the preview
+    public void CancelPlacement()
+    {
+        if (currentPreviewBuilding != null)
+        {
+            Destroy(currentPreviewBuilding);
+            currentPreviewBuilding = null;
+        }
+        IsPlacingBuilding = false; // Indicate that placement mode is off
+        currentBuildingDataToPlace = null; // Clear the selected building data
+        currentRotationY = 0f; // Reset rotation to default when placement is canceled
+        Debug.Log("Building placement cancelled. Rotation reset to 0.");
+    }
+
+    // Applies the valid/invalid material to all renderers of the preview building
+    void SetPreviewMaterial(Material mat)
+    {
+        Renderer[] renderers = currentPreviewBuilding.GetComponentsInChildren<Renderer>();
+        foreach (Renderer rend in renderers)
+        {
+            // Only apply to MeshRenderers and SkinnedMeshRenderers, not other types like LineRenderer etc.
+            if (rend is MeshRenderer || rend is SkinnedMeshRenderer)
+            {
+                rend.material = mat;
+            }
+        }
+    }
+
+    // Helper to check if the mouse pointer is currently over a UI element
+    private bool IsMouseOverUI()
+    {
+        // For standalone input module (most common)
+        if (EventSystem.current == null) return false;
+        return EventSystem.current.IsPointerOverGameObject();
+    }
+}
