@@ -1,235 +1,77 @@
+// Assets/Scripts/BuildingConstruction.cs
 using UnityEngine;
-using System.Collections.Generic;
-using System.Linq;
+using System.Collections; // Required for IEnumerator and Coroutines
 
 public class BuildingConstruction : MonoBehaviour
 {
-    // Public properties (set by BuildingPlacementManager upon instantiation)
-    private BuildingData _buildingData;
-    public BuildingData BuildingData { get { return _buildingData; } }
+    private float constructionTimeRemaining;
+    private GameObject finalBuildingPrefab;
+    private bool isUnderConstruction = false;
 
-    [Header("Construction Progress")]
-    [Tooltip("Current time elapsed since construction started.")]
-    public float currentConstructionTime;
-    [Tooltip("Current construction progress from 0 (start) to 1 (complete).")]
-    [Range(0f, 1f)]
-    public float constructionProgress;
-
-    // Internal list to manage all building parts that will be revealed
-    private struct BuildingPart
+    // This method is called from BuildingPlacementManager.PlaceBuilding
+    // It takes the total construction time and the prefab to swap to when finished.
+    public void StartConstruction(float time, GameObject finalPrefab)
     {
-        public GameObject gameObject;
-        public Renderer[] renderers; // All renderers within this part's hierarchy
-        public Collider[] colliders; // All colliders within this part's hierarchy
-        public float baseLocalY;     // The lowest Y-point of this part relative to the building's root
-    }
-    private List<BuildingPart> _allBuildingParts = new List<BuildingPart>();
-
-    // This method is called by BuildingPlacementManager AFTER the building is placed.
-    // It passes the BuildingData and initializes the construction process.
-    public void Initialize(BuildingData data)
-    {
-        _buildingData = data;
-        currentConstructionTime = 0f;
-        constructionProgress = 0f;
-
-        // Ensure the building is properly tagged for overlap checks
-        gameObject.tag = "Building";
-
-        // Collect all parts and prepare them for construction animation
-        CollectAndPrepareBuildingParts();
-
-        // Initial state: all visual parts are hidden, colliders are active for the base
-        UpdateConstructionVisuals(0f); // Set to 0 progress to hide all initially
-        
-        // Ensure the root collider is solid (not trigger) for overlap checks later.
-        // This collider should be on the root GameObject of the prefab.
-        Collider rootCollider = GetComponent<Collider>();
-        if (rootCollider != null) rootCollider.isTrigger = false;
-
-        Debug.Log($"Initialized construction for {_buildingData.buildingName}. Total construction time: {_buildingData.constructionTime}s.");
-    }
-
-    // Gathers all child GameObjects with renderers/colliders and sorts them by Y-position.
-    void CollectAndPrepareBuildingParts()
-    {
-        _allBuildingParts.Clear();
-
-        // Find all direct children of this GameObject that have renderers or colliders
-        // This assumes your building parts are direct children, or within sub-children that also contain the visual parts.
-        // If your model is a single mesh, this will still work, processing only that mesh.
-        foreach (Transform childTransform in transform)
+        if (isUnderConstruction)
         {
-            // We want to control the visibility of all actual mesh parts, not empty parents
-            Renderer[] childRenderers = childTransform.GetComponentsInChildren<Renderer>(true);
-            Collider[] childColliders = childTransform.GetComponentsInChildren<Collider>(true);
-
-            if (childRenderers.Length > 0 || childColliders.Length > 0)
-            {
-                // Calculate the lowest Y-point of this part's visual bounds relative to the building's root.
-                // This is crucial for bottom-to-top reveal.
-                float minY = float.MaxValue;
-                foreach (Renderer r in childRenderers)
-                {
-                    minY = Mathf.Min(minY, r.bounds.min.y - transform.position.y);
-                }
-                if (childRenderers.Length == 0) // If no renderers, use collider bounds
-                {
-                    foreach (Collider c in childColliders)
-                    {
-                        minY = Mathf.Min(minY, c.bounds.min.y - transform.position.y);
-                    }
-                }
-                if (minY == float.MaxValue) minY = 0; // Fallback if no renderers/colliders
-
-                _allBuildingParts.Add(new BuildingPart
-                {
-                    gameObject = childTransform.gameObject,
-                    renderers = childRenderers,
-                    colliders = childColliders,
-                    baseLocalY = minY
-                });
-            }
+            Debug.LogWarning($"{gameObject.name} is already under construction.");
+            return; // Prevent starting construction multiple times
         }
 
-        // Sort the collected parts by their base Y-position, from bottom to top
-        _allBuildingParts = _allBuildingParts.OrderBy(p => p.baseLocalY).ToList();
+        constructionTimeRemaining = time;
+        finalBuildingPrefab = finalPrefab;
+        isUnderConstruction = true;
 
-        Debug.Log($"Collected {_allBuildingParts.Count} unique building parts for construction on {gameObject.name}.");
+        // Optionally: Visual indication for being under construction
+        // For example, you might make the initial prefab transparent, or swap to a construction-specific model.
+        // For now, we'll assume the 'initialConstructionPrefab' (from BuildingData)
+        // is already meant to be the 'under construction' visual.
+
+        StartCoroutine(ConstructBuildingProcess());
+        Debug.Log($"{gameObject.name} started construction. Will finish in {time:F2} seconds.");
     }
 
-    // Sets the visibility and collider state of a specific building part.
-    void SetPartState(BuildingPart part, bool visible, bool collidersEnabled)
+    private IEnumerator ConstructBuildingProcess()
     {
-        foreach (Renderer r in part.renderers)
+        while (constructionTimeRemaining > 0)
         {
-            r.enabled = visible;
-        }
-        foreach (Collider c in part.colliders)
-        {
-            // Only enable/disable non-trigger colliders
-            if (!c.isTrigger) 
-            {
-                c.enabled = collidersEnabled;
-            }
-        }
-    }
-
-    // Called by BuildingPlacementManager to start the construction timer.
-    public void StartConstruction()
-    {
-        // Construction begins. Update() will now handle the progress.
-        this.enabled = true; // Ensure this script's Update runs
-    }
-
-    void Update()
-    {
-        if (_buildingData == null)
-        {
-            Debug.LogError("BuildingData is null for construction script. Cannot proceed.", this);
-            this.enabled = false;
-            return;
+            constructionTimeRemaining -= Time.deltaTime;
+            // You could update a UI progress bar here if you had one
+            yield return null; // Wait for the next frame
         }
 
-        if (_buildingData.constructionTime <= 0) // Instant build if time is 0 or less
+        // Ensure time doesn't go negative
+        constructionTimeRemaining = 0;
+        isUnderConstruction = false;
+
+        Debug.Log($"{gameObject.name} construction finished!");
+
+        // Replace with final prefab if one is provided
+        if (finalBuildingPrefab != null)
         {
-            CompleteConstruction();
-            this.enabled = false;
-            return;
-        }
+            // Instantiate the final building at the same position and rotation
+            // Make it a child of the same parent for scene hierarchy cleanliness
+            GameObject finalBuilding = Instantiate(finalBuildingPrefab, transform.position, transform.rotation, transform.parent);
 
-        if (currentConstructionTime < _buildingData.constructionTime)
-        {
-            currentConstructionTime += Time.deltaTime;
-            constructionProgress = Mathf.Clamp01(currentConstructionTime / _buildingData.constructionTime);
-            UpdateConstructionVisuals(constructionProgress);
+            // Optional: Copy additional properties or components if needed
+            // e.g., health, inventory components if they are on the initial prefab
+            // You might want to handle this more robustly if initial and final prefabs vary greatly.
 
-            if (currentConstructionTime >= _buildingData.constructionTime)
-            {
-                CompleteConstruction();
-            }
-        }
-    }
-
-    // Updates the visual state of the building parts based on construction progress.
-    void UpdateConstructionVisuals(float progress)
-    {
-        if (_allBuildingParts.Count == 0) return;
-
-        // Find min and max Y of all parts to normalize progress across the building's height
-        float minYAllParts = _allBuildingParts.Min(p => p.baseLocalY);
-        float maxYAllParts = _allBuildingParts.Max(p => p.baseLocalY);
-        float totalHeight = maxYAllParts - minYAllParts;
-        if (totalHeight <= 0) totalHeight = 0.01f; // Avoid division by zero, ensure some height for calculation
-
-        float currentYThreshold = minYAllParts + (progress * totalHeight);
-
-        foreach (var part in _allBuildingParts)
-        {
-            bool shouldBeVisible = (part.baseLocalY <= currentYThreshold);
-            SetPartState(part, shouldBeVisible, shouldBeVisible); // Colliders enabled as parts appear
-        }
-    }
-
-    // Finalizes the construction process.
-    void CompleteConstruction()
-    {
-        Debug.Log($"{_buildingData.buildingName} construction complete!");
-
-        // Option 1: If there's a separate final prefab, instantiate it and destroy this construction object.
-        if (_buildingData.finalPrefab != null && _buildingData.finalPrefab != _buildingData.initialConstructionPrefab)
-        {
-            Debug.Log($"Swapping {_buildingData.buildingName} to final prefab.");
-            GameObject finalBuilding = Instantiate(_buildingData.finalPrefab, transform.position, transform.rotation, transform.parent);
-            finalBuilding.name = _buildingData.buildingName + " (Complete)";
-            finalBuilding.tag = "Building"; // Ensure final building has the tag for overlap checks
-
-            // If the final prefab also has a BuildingConstruction script, disable it
-            // as it's already built. Or remove it if not needed.
-            BuildingConstruction finalConstructionScript = finalBuilding.GetComponent<BuildingConstruction>();
-            if (finalConstructionScript != null)
-            {
-                finalConstructionScript.enabled = false;
-                // You might also want to ensure all its parts are visible if they aren't by default
-                // by calling finalConstructionScript.UpdateConstructionVisuals(1f);
-            }
-            
-            // Destroy the temporary construction version
+            // Destroy the temporary construction object (this GameObject)
             Destroy(gameObject);
-            return; // Exit as this object is being destroyed
+            Debug.Log($"Replaced with final prefab: {finalBuilding.name}.");
         }
         else
         {
-            // Option 2: No separate final prefab. Just make sure all parts are visible and solid.
-            Debug.Log($"No separate final prefab for {_buildingData.buildingName}. Ensuring all construction parts are fully visible and colliders active.");
-            currentConstructionTime = _buildingData.constructionTime; // Ensure time is maxed
-            constructionProgress = 1f; // Ensure progress is maxed
-            UpdateConstructionVisuals(1f); // Force all visuals to appear
+            // If no final prefab, this object IS the final building.
+            // Just enable its colliders and make it fully opaque if it was transparent for construction.
+            Collider buildingCollider = GetComponent<Collider>();
+            if (buildingCollider != null)
+            {
+                buildingCollider.enabled = true; // Enable collider once construction is done
+            }
+            // Add any other "finished" state logic here (e.g., enable scripts, change materials)
+            Debug.Log($"{gameObject.name} is now complete (no final prefab to swap to).");
         }
-
-        this.enabled = false; // Stop updating this script once construction is complete
-    }
-
-    // --- SPECIAL METHOD FOR BuildingPlacementManager PREVIEW (called from placement manager) ---
-    // This is explicitly called by BuildingPlacementManager to set up the preview object.
-    // It ensures the preview visual is set correctly without affecting the actual construction logic.
-    public void PrepareForPreview()
-    {
-        // For the preview, we want all renderers to be active so BuildingPlacementManager can apply
-        // the transparent ghost material. Colliders should be triggers.
-        Renderer[] allRenderers = GetComponentsInChildren<Renderer>(true);
-        foreach (Renderer r in allRenderers)
-        {
-            r.enabled = true; // Ensure renderers are enabled for the preview material to show
-        }
-        
-        Collider[] allColliders = GetComponentsInChildren<Collider>(true);
-        foreach (Collider c in allColliders)
-        {
-            c.isTrigger = true; // Make all preview colliders triggers for placement checks
-        }
-
-        // Disable this script's Update loop for the preview, as it's not actually "constructing"
-        this.enabled = false; 
     }
 }
