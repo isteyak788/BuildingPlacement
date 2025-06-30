@@ -1,0 +1,293 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using Cinemachine;
+
+namespace CodeMonkey.CameraSystem {
+
+    public class CameraSystem : MonoBehaviour {
+
+        [Header("Cinemachine")]
+        [SerializeField] private CinemachineVirtualCamera cinemachineVirtualCamera;
+
+        [Header("Features")]
+        [Tooltip("Enables camera movement when the mouse cursor is near the screen edges.")]
+        [SerializeField] private bool useEdgeScrolling = false;
+        [Tooltip("Enables camera movement by holding down the right mouse button and dragging.")]
+        [SerializeField] private bool useDragPan = false;
+        [Tooltip("Enables camera rotation using Q and E keys.")]
+        [SerializeField] private bool useCameraRotation = true;
+        [Tooltip("Enables WASD keyboard camera movement.")]
+        [SerializeField] private bool useWASDMovement = true;
+
+        [Header("Zoom Types")]
+        [Tooltip("Enables zooming by changing the camera's field of view.")]
+        [SerializeField] private bool useZoomFieldOfView = false;
+        [Tooltip("Enables zooming by moving the camera's follow offset forward/backward.")]
+        [SerializeField] private bool useZoomMoveForward = false;
+        [Tooltip("Enables zooming by changing the Y-component of the camera's follow offset.")]
+        [SerializeField] private bool useZoomLowerY = true;
+        [Tooltip("If enabled, the Field of View will be locked to 'Fixed Field of View Value' unless 'Use Zoom Field Of View' is active.")]
+        [SerializeField] private bool useFixedFieldOfView = true;
+        [Tooltip("The fixed Field of View value used when 'Use Fixed Field Of View' is enabled and 'Use Zoom Field Of View' is not active.")]
+        [SerializeField] private float fixedFieldOfViewValue = 60f; // New: Default fixed FOV value
+
+
+        [Header("Movement Speeds")]
+        [Tooltip("Speed of camera movement when using WASD keys or edge scrolling.")]
+        [SerializeField] private float moveSpeed = 50f;
+        [Tooltip("Sensitivity of camera movement when using click and drag pan.")]
+        [SerializeField] private float dragPanSpeed = 1f;
+        [Tooltip("Speed of camera rotation when using Q and E keys.")]
+        [SerializeField] private float rotateSpeed = 100f;
+
+
+        [Header("Field of View Zoom Settings")]
+        [Tooltip("Maximum field of view for zooming out.")]
+        [SerializeField] private float fieldOfViewMax = 50;
+        [Tooltip("Minimum field of view for zooming in.")]
+        [SerializeField] private float fieldOfViewMin = 10;
+        [Tooltip("Speed at which the field of view changes during zoom.")]
+        [SerializeField] private float fieldOfViewZoomSpeed = 10f;
+
+
+        [Header("Follow Offset Zoom Settings (Move Forward)")]
+        [Tooltip("Minimum magnitude of the follow offset for zooming in (for MoveForward zoom).")]
+        [SerializeField] private float followOffsetMin = 5f;
+        [Tooltip("Maximum magnitude of the follow offset for zooming out (for MoveForward zoom).")]
+        [SerializeField] private float followOffsetMax = 50f;
+        [Tooltip("Amount to change the follow offset by per scroll tick (for MoveForward zoom).")]
+        [SerializeField] private float followOffsetZoomAmount = 3f;
+        [Tooltip("Speed at which the follow offset changes during zoom (for MoveForward zoom).")]
+        [SerializeField] private float followOffsetZoomSpeed = 10f;
+
+
+        [Header("Follow Offset Y-Axis Zoom Settings (Lower Y)")]
+        [Tooltip("Minimum Y-component of the follow offset for zooming in (for LowerY zoom).")]
+        [SerializeField] private float followOffsetMinY = 10f;
+        [Tooltip("Maximum Y-component of the follow offset for zooming out (for LowerY zoom).")]
+        [SerializeField] private float followOffsetMaxY = 50f;
+        [Tooltip("Amount to change the Y-component of the follow offset by per scroll tick (for LowerY zoom).")]
+        [SerializeField] private float followOffsetZoomAmountY = 3f;
+        [Tooltip("Speed at which the follow offset Y-component changes during zoom (for LowerY zoom).")]
+        [SerializeField] private float followOffsetZoomSpeedY = 10f;
+
+
+        // Private internal state variables
+        private bool dragPanMoveActive;
+        private Vector2 lastMousePosition;
+        private float targetFieldOfView;
+        private Vector3 followOffset;
+
+        // Store previous zoom state for detecting changes
+        private bool wasUsingZoomFieldOfView;
+        private bool wasUsingZoomMoveForward;
+        private bool wasUsingZoomLowerY;
+
+
+        private void Awake() {
+            if (cinemachineVirtualCamera == null) {
+                Debug.LogError("CinemachineVirtualCamera not assigned in CameraSystem!");
+                // Provide default values if camera is not assigned to prevent errors
+                targetFieldOfView = 50f;
+                followOffset = new Vector3(0, 20, -20); // Example default
+                return;
+            }
+
+            // Initialize targetFieldOfView based on fixed FOV or current camera's FOV
+            if (useFixedFieldOfView) {
+                targetFieldOfView = fixedFieldOfViewValue;
+                cinemachineVirtualCamera.m_Lens.FieldOfView = fixedFieldOfViewValue; // Set immediately
+            } else {
+                targetFieldOfView = cinemachineVirtualCamera.m_Lens.FieldOfView;
+            }
+            
+            followOffset = cinemachineVirtualCamera.GetCinemachineComponent<CinemachineTransposer>().m_FollowOffset;
+
+            // Initialize previous states
+            wasUsingZoomFieldOfView = useZoomFieldOfView;
+            wasUsingZoomMoveForward = useZoomMoveForward;
+            wasUsingZoomLowerY = useZoomLowerY;
+        }
+
+        private void Update() {
+            if (cinemachineVirtualCamera == null) return; // Prevent errors if camera not assigned
+
+            HandleZoomTypeSwitch(); // Check for zoom type changes and reset FOV if needed
+
+            if (useWASDMovement) {
+                HandleCameraMovementWASD();
+            }
+
+            if (useEdgeScrolling) {
+                HandleCameraMovementEdgeScrolling();
+            }
+
+            if (useDragPan) {
+                HandleCameraMovementDragPan();
+            }
+
+            // Only allow camera rotation if 'useCameraRotation' is true AND
+            // if the BuildingPlacementManager is NOT currently placing a building.
+            // This prevents camera rotation when you're rotating the building preview.
+            if (useCameraRotation && (BuildingPlacementManager.Instance == null || !BuildingPlacementManager.Instance.IsPlacingBuilding)) {
+                HandleCameraRotation();
+            }
+
+            // Handle Zoom based on toggles
+            if (useZoomFieldOfView) {
+                HandleCameraZoom_FieldOfView();
+            } else if (useZoomMoveForward) { // Use else if to prioritize one zoom if multiple are enabled
+                HandleCameraZoom_MoveForward();
+            } else if (useZoomLowerY) {
+                HandleCameraZoom_LowerY();
+            } else if (useFixedFieldOfView) {
+                // Keep FOV at the fixed value if no other zoom is active and fixed FOV is desired
+                cinemachineVirtualCamera.m_Lens.FieldOfView = 
+                    Mathf.Lerp(cinemachineVirtualCamera.m_Lens.FieldOfView, fixedFieldOfViewValue, Time.deltaTime * fieldOfViewZoomSpeed);
+            }
+        }
+
+        private void HandleZoomTypeSwitch() {
+            // If we were using FieldOfView zoom, but now we are not, or we are using fixed FOV
+            // and we just disabled FieldOfView zoom.
+            if (wasUsingZoomFieldOfView && !useZoomFieldOfView) {
+                // Reset FOV to fixed value if fixed FOV is enabled, or to targetFieldOfView if not using fixed.
+                targetFieldOfView = useFixedFieldOfView ? fixedFieldOfViewValue : cinemachineVirtualCamera.m_Lens.FieldOfView;
+            }
+            // If fixed FOV is enabled and Field Of View zoom is not active, ensure FOV is reset to the fixed value
+            if (useFixedFieldOfView && !useZoomFieldOfView && cinemachineVirtualCamera.m_Lens.FieldOfView != fixedFieldOfViewValue) {
+                   cinemachineVirtualCamera.m_Lens.FieldOfView = Mathf.Lerp(cinemachineVirtualCamera.m_Lens.FieldOfView, fixedFieldOfViewValue, Time.deltaTime * fieldOfViewZoomSpeed);
+            }
+
+
+            // Update previous states for the next frame
+            wasUsingZoomFieldOfView = useZoomFieldOfView;
+            wasUsingZoomMoveForward = useZoomMoveForward;
+            wasUsingZoomLowerY = useZoomLowerY;
+        }
+
+
+        private void HandleCameraMovementWASD() {
+            Vector3 inputDir = new Vector3(0, 0, 0);
+
+            if (Input.GetKey(KeyCode.W)) inputDir.z = +1f;
+            if (Input.GetKey(KeyCode.S)) inputDir.z = -1f;
+            if (Input.GetKey(KeyCode.A)) inputDir.x = -1f;
+            if (Input.GetKey(KeyCode.D)) inputDir.x = +1f;
+
+            Vector3 moveDir = transform.forward * inputDir.z + transform.right * inputDir.x;
+
+            transform.position += moveDir * moveSpeed * Time.deltaTime;
+        }
+
+        private void HandleCameraMovementEdgeScrolling() {
+            Vector3 inputDir = new Vector3(0, 0, 0);
+
+            int edgeScrollSize = 20; // This could also be made public if needed
+
+            if (Input.mousePosition.x < edgeScrollSize) {
+                inputDir.x = -1f;
+            }
+            if (Input.mousePosition.y < edgeScrollSize) {
+                inputDir.z = -1f;
+            }
+            if (Input.mousePosition.x > Screen.width - edgeScrollSize) {
+                inputDir.x = +1f;
+            }
+            if (Input.mousePosition.y > Screen.height - edgeScrollSize) {
+                inputDir.z = +1f;
+            }
+
+            Vector3 moveDir = transform.forward * inputDir.z + transform.right * inputDir.x;
+
+            transform.position += moveDir * moveSpeed * Time.deltaTime;
+        }
+
+        private void HandleCameraMovementDragPan() {
+            Vector3 inputDir = new Vector3(0, 0, 0);
+
+            if (Input.GetMouseButtonDown(1)) { // Right-click to start drag
+                dragPanMoveActive = true;
+                lastMousePosition = Input.mousePosition;
+            }
+            if (Input.GetMouseButtonUp(1)) { // Right-click to stop drag
+                dragPanMoveActive = false;
+            }
+
+            if (dragPanMoveActive) {
+                Vector2 mouseMovementDelta = (Vector2)Input.mousePosition - lastMousePosition;
+
+                inputDir.x = mouseMovementDelta.x * dragPanSpeed;
+                inputDir.z = mouseMovementDelta.y * dragPanSpeed;
+
+                lastMousePosition = Input.mousePosition;
+            }
+
+            Vector3 moveDir = transform.forward * inputDir.z + transform.right * inputDir.x;
+
+            transform.position += moveDir * moveSpeed * Time.deltaTime;
+        }
+
+        private void HandleCameraRotation() {
+            float rotateDir = 0f;
+            if (Input.GetKey(KeyCode.Q)) rotateDir = +1f;
+            if (Input.GetKey(KeyCode.E)) rotateDir = -1f;
+
+            transform.eulerAngles += new Vector3(0, rotateDir * rotateSpeed * Time.deltaTime, 0);
+        }
+
+        private void HandleCameraZoom_FieldOfView() {
+            // Only allow zooming if this type is enabled
+            if (useZoomFieldOfView) {
+                if (Input.mouseScrollDelta.y > 0) {
+                    targetFieldOfView -= 5; // Zoom in
+                }
+                if (Input.mouseScrollDelta.y < 0) {
+                    targetFieldOfView += 5; // Zoom out
+                }
+
+                targetFieldOfView = Mathf.Clamp(targetFieldOfView, fieldOfViewMin, fieldOfViewMax);
+
+                cinemachineVirtualCamera.m_Lens.FieldOfView = 
+                    Mathf.Lerp(cinemachineVirtualCamera.m_Lens.FieldOfView, targetFieldOfView, Time.deltaTime * fieldOfViewZoomSpeed);
+            }
+        }
+
+        private void HandleCameraZoom_MoveForward() {
+            Vector3 zoomDir = followOffset.normalized;
+
+            if (Input.mouseScrollDelta.y > 0) {
+                followOffset -= zoomDir * followOffsetZoomAmount; // Zoom in
+            }
+            if (Input.mouseScrollDelta.y < 0) {
+                followOffset += zoomDir * followOffsetZoomAmount; // Zoom out
+            }
+
+            if (followOffset.magnitude < followOffsetMin) {
+                followOffset = zoomDir * followOffsetMin;
+            }
+
+            if (followOffset.magnitude > followOffsetMax) {
+                followOffset = zoomDir * followOffsetMax;
+            }
+
+            cinemachineVirtualCamera.GetCinemachineComponent<CinemachineTransposer>().m_FollowOffset = 
+                Vector3.Lerp(cinemachineVirtualCamera.GetCinemachineComponent<CinemachineTransposer>().m_FollowOffset, followOffset, Time.deltaTime * followOffsetZoomSpeed);
+        }
+
+        private void HandleCameraZoom_LowerY() {
+            if (Input.mouseScrollDelta.y > 0) {
+                followOffset.y -= followOffsetZoomAmountY; // Zoom in (lower Y)
+            }
+            if (Input.mouseScrollDelta.y < 0) {
+                followOffset.y += followOffsetZoomAmountY; // Zoom out (raise Y)
+            }
+
+            followOffset.y = Mathf.Clamp(followOffset.y, followOffsetMinY, followOffsetMaxY);
+
+            cinemachineVirtualCamera.GetCinemachineComponent<CinemachineTransposer>().m_FollowOffset = 
+                Vector3.Lerp(cinemachineVirtualCamera.GetCinemachineComponent<CinemachineTransposer>().m_FollowOffset, followOffset, Time.deltaTime * followOffsetZoomSpeedY);
+        }
+    }
+}
