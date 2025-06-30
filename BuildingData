@@ -1,5 +1,16 @@
 using UnityEngine;
 
+// Define an enum for all possible placement methods
+public enum BuildingPlacementMethodType
+{
+    None,   // No default, will show the selection panel
+    Single,
+    Line,
+    Box,    // For future use
+    Custom1, // For future use
+    Custom2  // For future use
+}
+
 [CreateAssetMenu(fileName = "NewBuildingData", menuName = "Building System/Building Data")]
 public class BuildingData : ScriptableObject
 {
@@ -25,4 +36,15 @@ public class BuildingData : ScriptableObject
     public int terrainCheckGridDensity = 3;
     [Tooltip("Maximum allowable height difference (in Unity units) across the building's footprint for valid placement (e.g., to prevent placing on steep slopes).")]
     public float maxTerrainHeightDifference = 1.0f; // Max allowed height difference across footprint
+
+    [Header("Available Placement Modes")]
+    [Tooltip("Allows this building to be placed individually.")]
+    public bool allowSinglePlacement = true;
+    [Tooltip("Allows this building to be placed by drawing a line.")]
+    public bool allowLinePlacement = false;
+    // Add more placement types here as needed
+
+    [Header("Default Placement Method")]
+    [Tooltip("If set, this method will be used by default when selecting this building type, bypassing the placement selection panel. Make sure the selected method is also 'allowed' above.")]
+    public BuildingPlacementMethodType defaultPlacementMethod = BuildingPlacementMethodType.None;
 }
