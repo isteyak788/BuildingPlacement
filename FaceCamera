@@ -1,0 +1,31 @@
+// Assets/Scripts/FaceCamera.cs
+using UnityEngine;
+
+public class FaceCamera : MonoBehaviour
+{
+    private Camera mainCamera;
+
+    void Start()
+    {
+        mainCamera = Camera.main; // Automatically finds the camera tagged "MainCamera"
+        if (mainCamera == null)
+        {
+            Debug.LogError("FaceCamera: No main camera found in the scene! Please tag your main camera as 'MainCamera' in the Inspector.");
+            enabled = false; // Disable this script if no camera is found
+        }
+    }
+
+    void LateUpdate() // Use LateUpdate to ensure the camera's position/rotation has been updated for this frame
+    {
+        if (mainCamera == null) return;
+
+        // Make the UI panel look at the camera.
+        // transform.position + mainCamera.transform.rotation * Vector3.forward calculates a point
+        // slightly in front of the camera, allowing the UI's local Z-axis to point towards it.
+        // This makes the UI's front surface face the camera.
+        transform.LookAt(transform.position + mainCamera.transform.rotation * Vector3.forward, mainCamera.transform.rotation * Vector3.up);
+
+        // If your UI looks flipped or upside down, you might need to adjust the LookAt parameters
+        // or rotate the RectTransform of the Canvas in the Editor (e.g., -180 on Y for the Panel).
+    }
+}
